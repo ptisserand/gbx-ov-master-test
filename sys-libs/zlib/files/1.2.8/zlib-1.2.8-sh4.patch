@@ -1,0 +1,805 @@
+diff -r 4861ca9b910d Makefile.in
+--- a/Makefile.in	Thu Jun 27 11:36:51 2013 +0200
++++ b/Makefile.in	Thu Jun 27 11:45:33 2013 +0200
+@@ -66,6 +66,23 @@
+ OBJA =
+ PIC_OBJA =
+ 
++ARCH= # the target arch for which gcc is configured
++
++# pull in arch specific stuff, if any
++-include contrib/$(ARCH)/Makefile.arch
++
++ifneq ($(ARCH_OBJS),)
++OBJA :=  $(addprefix contrib/$(ARCH)/, $(ARCH_OBJS))
++CFLAGS += -I.
++ARCH_OBJS_DIR := objs/contrib/$(ARCH)
++endif
++
++ifneq ($(ARCH_PIC_OBJS),)
++PIC_OBJA :=  $(addprefix contrib/$(ARCH)/, $(ARCH_PIC_OBJS))
++SFLAGS += -I.
++ARCH_OBJS_DIR := objs/contrib/$(ARCH)
++endif
++
+ OBJS = $(OBJC) $(OBJA)
+ 
+ PIC_OBJS = $(PIC_OBJC) $(PIC_OBJA)
+@@ -159,12 +176,15 @@
+ 	$(CC) $(SFLAGS) -DPIC -c -o objs/$*.o $<
+ 	-@mv objs/$*.o $@
+ 
+-placebo $(SHAREDLIBV): $(PIC_OBJS) libz.a
++$(ARCH_OBJS_DIR):
++	-@mkdir -p $@
++
++placebo $(SHAREDLIBV): $(ARCH_OBJS_DIR) $(PIC_OBJS) libz.a
+ 	$(LDSHARED) $(SFLAGS) -o $@ $(PIC_OBJS) $(LDSHAREDLIBC) $(LDFLAGS)
+ 	rm -f $(SHAREDLIB) $(SHAREDLIBM)
+ 	ln -s $@ $(SHAREDLIB)
+ 	ln -s $@ $(SHAREDLIBM)
+-	-@rmdir objs
++	-@rm -rf objs
+ 
+ example$(EXE): example.o $(STATICLIB)
+ 	$(CC) $(CFLAGS) -o $@ example.o $(TEST_LDFLAGS)
+@@ -241,7 +261,7 @@
+ 
+ mostlyclean: clean
+ clean:
+-	rm -f *.o *.lo *~ \
++	rm -f *.o *.lo *~ contrib/$(ARCH)/*.o contrib/$(ARCH)/*.lo \
+ 	   example$(EXE) minigzip$(EXE) examplesh$(EXE) minigzipsh$(EXE) \
+ 	   example64$(EXE) minigzip64$(EXE) \
+ 	   infcover \
+diff -r 4861ca9b910d configure
+--- a/configure	Thu Jun 27 11:36:51 2013 +0200
++++ b/configure	Thu Jun 27 11:45:33 2013 +0200
+@@ -772,6 +772,8 @@
+ echo sharedlibdir = $sharedlibdir >> configure.log
+ echo uname = $uname >> configure.log
+ 
++ARCH=$($CC -dumpmachine | awk -F "-" '{print $1}')
++
+ # udpate Makefile with the configure results
+ sed < Makefile.in "
+ /^CC *=/s#=.*#=$CC#
+@@ -800,6 +802,7 @@
+ /^PIC_OBJC *=/s#=.*#= $PIC_OBJC#
+ /^all: */s#:.*#: $ALL#
+ /^test: */s#:.*#: $TEST#
++/^ARCH *=/s#=.*#=$ARCH#
+ " > Makefile
+ 
+ # create zlib.pc with the configure results
+diff -r 4861ca9b910d contrib/README.contrib
+--- a/contrib/README.contrib	Thu Jun 27 11:36:51 2013 +0200
++++ b/contrib/README.contrib	Thu Jun 27 11:45:33 2013 +0200
+@@ -76,3 +76,6 @@
+ vstudio/    by Gilles Vollant <info@winimage.com>
+         Building a minizip-enhanced zlib with Microsoft Visual Studio
+         Includes vc11 from kreuzerkrieg and vc12 from davispuh
++
++sh4/        by Laurent Alfonsi <laurent.alfonsi@st.com>
++        Hand optimized assembly code for SH4 that should replace inflate_fast()
+diff -r 4861ca9b910d contrib/sh4/Makefile.arch
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/contrib/sh4/Makefile.arch	Thu Jun 27 11:45:33 2013 +0200
+@@ -0,0 +1,7 @@
++#SH4 specific settings
++ifeq "$(NOUSEASM)" ""
++ CFLAGS += -DASMINF=1
++ SFLAGS += -DASMINF=1
++ ARCH_OBJS := inffast.o
++ ARCH_PIC_OBJS := inffast.lo
++endif
+diff -r 4861ca9b910d contrib/sh4/inffast.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/contrib/sh4/inffast.c	Thu Jun 27 11:45:33 2013 +0200
+@@ -0,0 +1,706 @@
++/* inffast.c is a hand tuned assembler version of
++ *
++ * inffast.c -- fast decoding
++ * Copyright (C) 1995-2003 Mark Adler
++ * For conditions of distribution and use, see copyright notice in zlib.h
++ *
++ * Copyright (C) 2003 Chris Anderson <christop@charm.net>
++ * Please use the copyright conditions above.
++ *
++ * Sep-19-2011 --  optimized version for SH4 -- Laurent Alfonsi <laurent.alfonsi@st.com>
++ *
++ */
++
++#include "zutil.h"
++#include "inftrees.h"
++#include "inflate.h"
++#include "inffast.h"
++
++void inflate_fast(z_streamp strm, unsigned start)
++{
++    struct inflate_state FAR *state;
++    volatile struct inffast_ar {
++    /* OFFSETS  */
++
++    /*  0   */    unsigned char FAR *beg;   	/*  */
++    /*  4   */    unsigned char FAR *window;	/*  */
++
++    /*  8   */    code const FAR *lcode;    	/*  */
++    /* 12   */    code const FAR *dcode;    	/*  */
++
++    /* 16   */    unsigned whave;           	/*  */
++    /* 20   */    unsigned wsize;         		/*  */
++    /* 24   */    unsigned write;           	/*  */
++    /* 28   */    unsigned dmask;           	/*  */
++
++    /* 32   */    unsigned sane;          		/*  */
++    /* 36   */    unsigned status;          	/*  */
++
++    /* --   */    /* unsigned char FAR *from;*/  	/* when needed in R8 */
++    /* --   */    /* unsigned dist;*/            	/* when needed in R10 */
++    /* 40   */    unsigned saved_r15;
++    /* 44   */    unsigned saved_r14;
++
++    /* 48   */    code *here;               	/* when needed in R0 */
++    /* 52   */    unsigned char FAR *in;    	/* R1 */
++    /* 56   */    unsigned char FAR *out;   	/* R2 */
++    /* 60   */    unsigned char FAR *last;  	/* R3 */
++    /* 64   */    unsigned char FAR *end;   	/* R4 */
++	/* 68   */    unsigned long hold;       	/* R5 */
++	/* 72   */    unsigned bits;        		/* R6 */
++    /* 76   */    unsigned op;          		/* R7 */
++    /* 80   */    unsigned lmask;           	/* when needed in R8 */
++    /* 84   */    unsigned val;              	/* when needed in R10 */
++    /* 88   */    unsigned len;              	/* R11 */
++
++    } ar;
++
++
++#define PAD_AVAIL_IN 5
++#define PAD_AVAIL_OUT 257
++
++    state = (struct inflate_state FAR *)strm->state;
++
++    ar.in = strm->next_in;
++    ar.last = ar.in + (strm->avail_in - PAD_AVAIL_IN);
++    ar.out = strm->next_out;
++    ar.beg = ar.out - (start - strm->avail_out);
++    ar.end = ar.out + (strm->avail_out - PAD_AVAIL_OUT);
++
++    ar.wsize = state->wsize;
++    ar.whave = state->whave;
++    ar.write = state->wnext;
++    ar.window = state->window;
++    ar.sane = state->sane;
++
++    ar.hold = state->hold;
++    ar.bits = state->bits;
++    ar.lcode = state->lencode;
++    ar.dcode = state->distcode;
++    ar.lmask = (1U << state->lenbits) - 1;
++    ar.dmask = (1U << state->distbits) - 1;
++	ar.status = 0;
++
++    /* ASM : */
++
++		__asm__ __volatile__ (
++							 /***************
++								init registers for reg alloc
++							    goto .L_do_loop;
++								**************/
++		"		mov %0,r1\n"
++		"		mov.l r14,@(44,r1) /* saved_r14 */\n"
++		"		mov.l r15,@(40,r1) /* saved_r15 */\n"
++
++		"		mov r1,r14\n"
++		"		mov r14,r15\n"
++		"		add	#52,r14\n"
++		"		mov.l	@r14+,r1	/* in */\n"
++		"		mov.l	@r14+,r2	/* out */\n"
++		"		mov.l	@r14+,r3	/* last */\n"
++		"		mov.l	@r14+,r4	/* end */\n"
++		"		mov.l	@r14+,r5	/* hold */\n"
++		"		mov.l	@r14+,r6	/* bits */\n"
++		"		mov.l	@r14+,r7	/* op */\n"
++		"		mov.l	@r14+,r8	/* lmask */\n"
++		"		mov.l   @(8,r15),r9 /* lcode */\n"
++		"		mov.l	@r14+,r10	/* val */\n"
++		"		bra .L_do_loop\n"
++		"		mov.l	@r14+,r11	/* len */\n"
++
++
++							/***************
++							   goto .end_loop;
++							 **************/
++		".L_break_loop:\n"
++		"		bra .L_end_loop\n"
++		"		nop\n"
++
++							/***************
++							  if (ar.in >= ar.last) goto .L_break_loop;
++							  if (ar.out >= ar.end) goto .L_break_loop;
++							**************/
++		".align 2\n"
++		".L_while_test:\n"
++		"		cmp/hs r3,r1\n"
++		"		bt.s .L_break_loop\n"
++		"		cmp/hs r4,r2\n"
++		"		bt.s .L_break_loop\n"
++
++							/***************
++							  if (ar.bits >= 15) goto .L_get_length_code;
++							  ar.hold += (unsigned long)(PUP(ar.in)) << ar.bits;
++							  ar.bits += 8;
++							  ar.hold += (unsigned long)(PUP(ar.in)) << ar.bits;
++							  ar.bits += 8;
++							**************/
++		".L_do_loop:\n"
++		"		mov	#15,r14\n"
++		"		cmp/hs r14,r6\n"
++		"		bt .L_get_length_code\n"
++		"		mov.b  @r1+,r14\n"
++		"		mov.b  @r1+,r13\n"
++		"		extu.b r14,r14\n"
++		"		extu.b r13,r13\n"
++		"		shld   r6,r14\n"
++		"		add    #8,r6\n"
++		"		add    r14,r5\n"
++		"		shld   r6,r13\n"
++		"		add    #8,r6\n"
++		"		add    r13,r5\n"
++
++							/***************
++							  ar.here = (code*)&ar.lcode[ar.hold & ar.lmask];
++							**************/
++		".L_get_length_code:\n"
++		"		mov	  r5,r0\n"
++		"		and	  r8,r0\n"
++		"		shll2 r0\n"
++		"		add	  r9,r0\n"
++
++							/***************
++							  ar.op 	= (unsigned)(ar.here->op);
++							  ar.hold >>= (unsigned)(ar.here->bits);
++							  ar.bits  -= (unsigned)(ar.here->bits);
++							  ar.val	= (unsigned)(ar.here->val);
++							  Tracevv((stderr, "inflate:         literal 0x%02x\n", ar.here.val));
++							  if (ar.op != 0) goto .L_test_for_length_base;
++    						  PUP(ar.out) = (unsigned char)ar.val;
++    	    				  goto .L_while_test;
++							**************/
++		".L_dolen:\n"
++		"		mov.b	@r0+,r7\n"
++		/* "		extu.b	r7,r7\n" */				/* op in only on 7 bits */
++		"		mov.b	@r0+,r14\n"
++		"		tst	r7,r7\n"
++		"		extu.b	r14,r14\n"
++		"		mov.w	@r0,r10\n"
++		"		neg	r14,r14\n"
++		"		extu.w	r10,r10\n"
++		"		shld	r14,r5\n"
++		/* 		(gdb) call printf("inflate:         literal 0x%02x\n", $r10) */
++		"		bf.s 	.L_test_for_length_base\n"
++		"		add	r14,r6\n"
++		"		mov.b	r10,@r2\n"
++		"		bra	.L_while_test\n"
++		"		add	#1,r2\n"
++
++
++							/***************
++							   if ((ar.op & 16)==0) goto .L_test_for_second_level_length;
++							   goto .decode_distance;
++							 **************/
++		".align 2\n"
++		".L_test_for_length_base:\n"
++		"		mov	r7,r0\n"
++		"		tst	#16,r0\n"
++		"		bf .L_skip_bra_test_for_second_level_length\n"
++		"		bra .L_test_for_second_level_length\n"
++		".L_skip_bra_test_for_second_level_length:\n"
++		"		mov	#15,r14\n"						/* imported from block below */
++
++						    /***************
++    						    ar.len = ar.val;
++    						    ar.op &= 15;
++    						    if (ar.op==0) goto .L_decode_distance2;
++    						    if (ar.bits >= ar.op) goto .L_decode_distance1
++    						    ar.hold += (unsigned long)(PUP(ar.in)) << ar.bits;
++    						    ar.bits += 8;
++    						    ar.hold += (unsigned long)(PUP(ar.in)) << ar.bits;
++    						    ar.bits += 8;
++							  **************/
++		".L_decode_distance:\n"
++		"		and	r14,r7\n"
++		"		tst 	r7,r7\n"
++		"		bt.s	.L_decode_distance2\n"
++		"		mov	r10,r11\n"
++		"		cmp/hs r7,r6\n"
++		"		bt 		.L_decode_distance1\n"
++		"		mov.b  @r1+,r14\n"
++		"		mov.b  @r1+,r13\n"
++		"		extu.b r14,r14\n"
++		"		extu.b r13,r13\n"
++		"		shld   r6,r14\n"
++		"		add    #8,r6\n"
++		"		add    r14,r5\n"
++		"		shld   r6,r13\n"
++		"		add    #8,r6\n"
++		"		add    r13,r5\n"
++
++						    /***************
++						        ar.len += (unsigned)ar.hold & ((1U << ar.op) - 1);
++						        ar.hold >>= ar.op;
++						        ar.bits -= ar.op;
++							  **************/
++		".L_decode_distance1:\n"
++		"		mov	 #1,r14\n"
++		"		shld r7,r14\n"
++		"		neg	 r7,r7\n"
++		"		add	 #-1,r14\n"
++		"		add  r7,r6\n"
++		"		and  r5,r14\n"
++		"		shld r7,r5\n"
++		"		add	 r14,r11\n"
++		"		neg	 r7,r7\n"
++
++						    /***************
++    						    Tracevv((stderr, "inflate:         length %u\n", ar.len));
++    						    if (ar.bits >= 15) goto .get_distance_code;
++    						    ar.hold += (unsigned long)(PUP(ar.in)) << ar.bits;
++    						    ar.bits += 8;
++    						    ar.hold += (unsigned long)(PUP(ar.in)) << ar.bits;
++    						    ar.bits += 8;
++							  **************/
++		".L_decode_distance2:\n"
++		/* 		(gdb) call printf("inflate:         length %u\n", $r11) */
++		"		mov    #15,r14\n"
++		"		mov.l @(28,r15),r0 /* dmask */\n" 	/* imported from blcok below */
++		"		cmp/hs r14,r6\n"
++		"		bt.s .L_get_distance_code\n"
++		"	 	mov   r0,r9\n"					 	/* imported from blcok below */
++		"		mov.b  @r1+,r14\n"
++		"		mov.b  @r1+,r13\n"
++		"		extu.b r14,r14\n"
++		"		extu.b r13,r13\n"
++		"		shld   r6,r14\n"
++		"		add    #8,r6\n"
++		"		add    r14,r5\n"
++		"		shld   r6,r13\n"
++		"		add    #8,r6\n"
++		"		add    r13,r5\n"
++
++						    /***************
++								ar.here = (code*)&ar.dcode[ar.hold & ar.dmask];
++								 **************/
++		".L_get_distance_code:\n"
++		"    	and   r5,r9\n"
++		"    	mov.l @(12,r15),r0 /* dcode */\n"
++		"    	shll2 r9\n"
++		"    	add   r9,r0\n"
++
++							 /***************
++							   ar.op     = (unsigned)(ar.here->op);
++							   ar.hold >>= (unsigned)(ar.here->bits);
++							   ar.bits  -= (unsigned)(ar.here->bits);
++							   ar.val    = (unsigned)(ar.here->val);
++
++								if ((ar.op & 16)==0) goto .L_test_for_second_level_dist;
++						        ar.dist = ar.val;
++								ar.op &= 15;
++
++    						    if (ar.bits >= ar.op) goto .L_dodist1;
++    						    ar.hold += (unsigned long)(PUP(ar.in)) << ar.bits;
++    						    ar.bits += 8;
++
++    						    if (ar.bits >= ar.op) goto .L_dodist1;
++    						    ar.hold += (unsigned long)(PUP(ar.in)) << ar.bits;
++    						    ar.bits += 8;
++							 **************/
++		".L_dodist:\n"
++		"		mov.b	@r0+,r7\n"
++		/* "		extu.b	r7,r7\n" */				/* op in only on 7 bits */
++		"		mov.b	@r0+,r14\n"
++		"		mov.w	@r0,r10\n"
++		"		extu.b	r14,r14\n"
++		"		extu.w	r10,r10\n"
++		"		neg	r14,r14\n"
++		"		mov	r7,r0\n"
++		"		shld	r14,r5\n"
++		"		and	#16,r0\n"
++		"		add	r14,r6\n"
++		"		tst	r0,r0\n"
++		"		bt.s .L_test_for_second_level_dist\n"
++		"		mov	#15,r0\n"
++		"		and r0,r7\n"
++
++		"		cmp/hs r7,r6\n"
++		"		bt .L_dodist1\n"
++		"		mov.b  @r1+,r14\n"
++		"		extu.b	r14,r14\n"
++		"		shld   r6,r14\n"
++		"		add    #8,r6\n"
++		"		add    r14,r5\n"
++
++		"		cmp/hs r7,r6\n"
++		"		bt .L_dodist1\n"
++		"		mov.b  @r1+,r14\n"
++		"		extu.b	r14,r14\n"
++		"		shld   r6,r14\n"
++		"		add    #8,r6\n"
++		"		add    r14,r5\n"
++
++						    	/***************
++    							   ar.dist += (unsigned)ar.hold & ((1U << ar.op) - 1);
++    							   ar.hold >>= ar.op;
++    							   ar.bits -= ar.op;
++								   ar.op = (unsigned)(ar.out - ar.beg);
++
++								   Tracevv((stderr, "inflate:         distance %u\n", ar.dist));
++    							   if (ar.dist > ar.op) goto .L_clip_window;
++    							   ar.from = ar.out - ar.dist;
++    							   PUP(ar.out) = PUP(ar.from);
++    							   PUP(ar.out) = PUP(ar.from);
++    							   PUP(ar.out) = PUP(ar.from);
++								   ar.len -= 3;
++								 **************/
++		".L_dodist1:\n"
++		"		mov  #1,r14\n"
++		"		shld r7,r14\n"
++		"		neg  r7,r7\n"
++		"		add  #-1,r14\n"
++		"		add	 r7,r6\n"
++		"		and	 r5,r14\n"
++		"		shld r7,r5\n"
++		"		mov.l @(0,r15),r0	/* beg */\n"
++		"		add  r14,r10\n"
++		/* 		(gdb) call printf("inflate:         distance %u\n", $r10) */
++		"		mov  r2,r7\n"
++		"		mov  r0,r14\n"
++		"		sub  r14,r7\n"
++		"		cmp/hi r7,r10\n"
++		"		bt .L_clip_window\n"
++		"		mov r2,r8\n"
++		"		sub r10,r8\n"
++		"		mov.b  @r8+,r14\n"
++		"		add #-3,r11\n"
++		"		mov.b  r14,@r2\n"
++		"		add #1,r2\n"
++		"		mov.b  @r8+,r14\n"
++		"		mov.b  r14,@r2\n"
++		"		add #1,r2\n"
++		"		mov.b  @r8+,r14\n"
++		"		tst r11,r11\n"							/* imported from .L_do_copy */
++		"		mov.b  r14,@r2\n"
++		"		bra	.L_do_copy\n"
++		"		add #1,r2\n"
++
++						    	/***************
++    							   ar.op = ar.dist - ar.op;
++								   if (ar.op <= ar.whave) goto .L_clip_window2;
++    							   if (ar.sane) goto .L_invalid_distance_too_far;
++								 **************/
++		".L_clip_window:\n"
++		"		sub	r10,r7\n"
++		"		mov r15,r13\n"
++		"		mov.l   @(16,r15),r0 /* whave */\n"
++		"		neg	r7,r7\n"
++		"		cmp/hs r7,r0\n"
++		"		bt  .L_clip_window2\n"
++		"		mov.l   @(32,r15),r0 /* sane */\n"
++		"		tst r0,r0\n"
++		"		bt .L_skip_bra_invalid_distance_too_far\n"
++		"		bra .L_invalid_distance_too_far\n"
++		".L_skip_bra_invalid_distance_too_far:\n"
++		"		nop\n"
++
++						    	/***************
++    							   ar.from = ar.window;
++    							   if (ar.write != 0) goto .L_wrap_around_window;
++								   ar.from += ar.wsize - ar.op;
++    						       if (ar.op >= ar.len) goto .L_do_copy;
++								 **************/
++		".L_clip_window2:\n"
++		"		mov.l 	@(24,r13),r3 /* write */\n"
++		"		mov.l	@(4,r13),r8 /* window -> from */\n"
++		"		tst r3,r3\n"
++		"		bf.s 	 .L_wrap_around_window\n"
++		"		cmp/hs r11,r7\n"
++		"		mov.l   @(20,r15),r0  /* wsize */\n"
++		"		sub r7,r0\n"
++		"		add	 r0,r8\n"
++		"		bt.s .L_do_copy\n"
++		"		tst r11,r11\n"							/* imported from .L_do_copy */
++
++						    	/***************
++						           ar.len -= ar.op;
++    							   do {
++    							       PUP(ar.out) = PUP(ar.from);
++    							   } while (--ar.op);
++								   ar.from = ar.out - ar.dist;
++								   goto .do_copy;
++								 **************/
++		"		sub	r7,r11\n"
++		".L_repeat_clip_window2:\n"
++		"		mov.b  @r8+,r14\n"
++		"		dt		r7\n"
++		"		mov.b  r14,@r2\n"
++		"		bf.s 	.L_repeat_clip_window2\n"
++		"		add	#1,r2\n"
++		"		mov 	r2,r8\n"
++		"		sub 	r10,r8\n"
++		"		bra	.L_do_copy\n"
++		"		tst r11,r11\n"							/* imported from .do_copy */
++
++							    /***************
++    								if (ar.write >= ar.op) goto .L_contiguous_in_window;
++									ar.from += ar.wsize + ar.write - ar.op;
++									ar.op -= ar.write;
++    						        if (ar.op >= ar.len) goto .L_do_copy;
++								 **************/
++		".L_wrap_around_window:\n"
++		"		cmp/hs	r7,r3\n"
++		"		bt		.L_contiguous_in_window\n"
++		"		mov.l	@(20,r15),r0 /* wsize */\n"
++		"		add		r3,r0\n"
++		"		sub		r7,r0\n"
++		"		add		r0,r8\n"
++		"		sub		r3,r7\n"
++		"		cmp/hs	r11,r7\n"
++		"		bt.s		.L_do_copy\n"
++		"		tst r11,r11\n"							/* imported from .L_do_copy */
++
++						    	 /***************
++						       	   ar.len -= ar.op;
++    							   do {
++    							       PUP(ar.out) = PUP(ar.from);
++    							   } while (--ar.op);
++    							   ar.from = ar.window;
++								 **************/
++		"		sub	r7,r11\n"
++		".L_repeat_wrap_around_window:\n"
++		"		mov.b  @r8+,r14\n"
++		"		dt		r7\n"
++		"		mov.b  r14,@r2\n"
++		"		bf.s 	.L_repeat_wrap_around_window\n"
++		"		add	#1,r2\n"
++		"		mov.l	@(4,r15),r8 /* window -> from */\n"
++
++						    	/***************
++    						    if (ar.write >= ar.len) goto .L_do_copy;
++								ar.op = ar.write;
++						    	ar.len -= ar.op;
++    							do {
++    								PUP(ar.out) = PUP(ar.from);
++    							} while (--ar.op);
++								ar.from = ar.out - ar.dist;
++    							goto .L_do_copy;
++							  **************/
++		"		cmp/hs	r11,r3\n"
++		"		mov.l	@(24,r15),r7  /* write */\n"
++		"		bt.s		.L_do_copy\n"
++		"		tst r11,r11\n"							/* imported from .do_copy */
++		"		sub	r7,r11\n"
++		".L_repeat_wrap_around_window2:\n"
++		"		mov.b  @r8+,r14\n"
++		"		dt		r7\n"
++		"		mov.b  r14,@r2\n"
++		"		bf.s 	.L_repeat_wrap_around_window2\n"
++		"		add	#1,r2\n"
++		"		mov 	r2,r8\n"
++		"		sub 	r10,r8\n"
++		"		bra	.L_do_copy\n"
++		"		tst r11,r11\n"							/* imported from .L_do_copy */
++
++							    /***************
++    							   ar.from += ar.write - ar.op;
++    						       if (ar.op >= ar.len) goto .L_do_copy;
++						       	   ar.len -= ar.op;
++    							   do {
++    							       PUP(ar.out) = PUP(ar.from);
++    							   } while (--ar.op);
++								   ar.from = ar.out - ar.dist;
++    					           goto .L_do_copy;
++								 **************/
++		".L_contiguous_in_window:\n"
++		"		mov.l	@(24,r15),r0 /* write */\n"
++		"		sub	r7,r0\n"
++		"		add	r0,r8\n"
++		"		cmp/hs r11,r7\n"
++		"		bt.s .L_do_copy\n"
++		"		tst r11,r11\n"							/* imported from .L_do_copy */
++		"		sub	r7,r11\n"
++		".L_repeat_contiguous_in_window:\n"
++		"		mov.b  @r8+,r14\n"
++		"		dt		r7\n"
++		"		mov.b  r14,@r2\n"
++		"		bf.s 	.L_repeat_contiguous_in_window\n"
++		"		add	#1,r2\n"
++		"		mov 	r2,r8\n"
++		"		sub 	r10,r8\n"
++		"		bra	.L_do_copy\n"
++		"		tst r11,r11\n"							/* imported from .L_do_copy */
++
++						    	/***************
++    							    if ((ar.op & 64) != 0) goto .L_invalid_distance_code;
++									ar.here = (code*)&ar.dcode[ar.here->val + (ar.hold & ((1U << ar.op) - 1))];
++    					      		goto .L_dodist;
++								 **************/
++		".align 2\n"
++		".L_test_for_second_level_dist:\n"
++		"		mov r7,r0\n"
++		"		and #64,r0\n"
++		"		tst r0,r0\n"
++		"		bf 	 .L_invalid_distance_code\n"
++		"		mov #1,r14\n"
++		"		shld	r7,r14\n"
++		"		add #-1,r14\n"
++		"		and	 r5,r14\n"
++		"		add r10,r14\n"
++		"		shll2   r14\n"
++		"		mov.l @(12,r15),r0 /* dcode */\n"
++		"		bra	.L_dodist\n"
++		"		add	r14,r0\n"
++
++						    	/***************
++    							   	if ((ar.op & 64) != 0) goto .L_test_for_end_of_block;
++									ar.here = (code*)&ar.lcode[ar.here->val + (ar.hold & ((1U << ar.op) - 1))];
++									goto .L_dolen;
++								 **************/
++		".align 2\n"
++		".L_test_for_second_level_length:\n"
++		"		mov		#1,r14\n"
++		"		mov		r7,r0\n"
++		"		shld   	r7,r14\n"
++		"		and		#64,r0\n"
++		"		add		#-1,r14\n"
++		"		tst		r0,r0\n"
++		"		and  	r5,r14\n"
++		"		bf.s	.L_test_for_end_of_block\n"
++		"		add		r10,r14\n"
++		"		mov.l	@(8,r15),r0 /* lcode */\n"
++		"		shll2	r14\n"
++		"		bra	.L_dolen\n"
++		"		add	r14,r0\n"
++
++
++						    	/***************
++    							   while (ar.len--)
++    							       PUP(ar.out) = PUP(ar.from);
++    					      	   goto .L_while_test;
++								 **************/
++		".align 2\n"
++		".L_do_copy:\n"
++		"		bt  .L_skip_do_copy\n"
++
++		"		add #-4,r11\n"
++		"		cmp/pl r11\n"
++		"		bf .L_skip_do_mult_copy\n"
++
++		".L_repeat_do_mult_copy:\n"
++		"		mov.b  @r8+,r0\n"
++		"		add #-4,r11\n"
++		"		mov.b  r0,@r2\n"
++		"		mov.b  @r8+,r0\n"
++		"		mov.b  r0,@(1,r2)\n"
++		"		mov.b  @r8+,r0\n"
++		"		mov.b  r0,@(2,r2)\n"
++		"		mov.b  @r8+,r0\n"
++		"		cmp/pl r11\n"
++		"		mov.b  r0,@(3,r2)\n"
++		"		bt.s .L_repeat_do_mult_copy\n"
++		"		add #4,r2\n"
++
++		".L_skip_do_mult_copy:\n"
++		"		add #4,r11\n"
++		".L_repeat_do_copy:\n"
++		"		mov.b  @r8+,r14\n"
++		"		dt 	 r11\n"
++		"		mov.b  r14,@r2\n"
++		"		bf.s  .L_repeat_do_copy\n"
++		"		add #1,r2\n"
++
++		".L_skip_do_copy:\n"
++		"		mov r15,r14\n"
++		"		mov.l   @(8,r15),r0 /* lcode */\n"
++		"		add	#52,r14\n"
++		"		mov 	r0,r9\n"
++		"		mov.l	@(8,r14),r3 /* last */\n"
++		"		bra .L_while_test\n"
++		"		mov.l	@(28,r14),r8 /* lmask */\n"
++
++
++						    	/***************
++    							   if ((ar.op & 32) == 0) goto .L_invalid_literal_length_code;
++    							   Tracevv((stderr, "inflate:         end of block\n"));
++    							   ar.status = 1;
++								   goto .L_break_loop;
++								 **************/
++		".align 2\n"
++		".L_test_for_end_of_block:\n"
++		"		mov	r7,r0\n"
++		"		and	#32,r0\n"
++		"		tst	r0,r0\n"
++		"		bt		.L_invalid_literal_length_code\n"
++		/* 		(gdb) call printf("inflate:         end of block\n") */
++		"		mov 	#1,r0\n"
++		"		bra .L_end_loop\n"
++		"		mov.l	r0,@(36,r15) /* status */\n"
++
++						    	/***************
++    							ar.status = 1;
++								goto .L_break_loop;
++								 **************/
++		".L_invalid_literal_length_code:\n"
++		"		mov	 #2,r0\n"
++		"		bra .L_end_loop\n"
++		"		mov.l   r0,@(36,r15) /* status */\n"
++
++						    /***************
++    							ar.status = 1;
++								goto .L_break_loop;
++								 **************/
++		".L_invalid_distance_code:\n"
++		"		mov	  #3,r0\n"
++		"		bra	.L_end_loop\n"
++		"		mov.l   r0,@(36,r15) /* status */\n"
++
++						    /***************
++    							ar.status = 1;
++								goto .L_break_loop;
++								 **************/
++		".L_invalid_distance_too_far:\n"
++		"		mov	  #4,r0\n"
++		"		mov.l   r0,@(36,r15) /* status */\n"
++
++		".L_end_loop:\n"
++		"		add	#40,r15\n"
++		"		mov.l  r1,@(12,r15)    /* in */\n"
++		"		mov.l  r2,@(16,r15)    /* out */\n"
++		"		mov.l  r3,@(20,r15)    /* last */\n"
++		"		mov.l  r4,@(24,r15)    /* end */\n"
++		"		mov.l  r5,@(28,r15)    /* hold */\n"
++		"		mov.l  r6,@(32,r15)    /* bits */\n"
++		"		mov.l  r7,@(36,r15)    /* op */\n"
++		"		mov.l  r8,@(40,r15)    /* lmask */\n"
++		"		mov.l  r10,@(44,r15)    /* val */\n"
++		"		mov.l  r11,@(48,r15)    /* len */\n"
++
++		"		mov.l 	@(4,r15),r14	/* restore saved_r14 */\n"
++		"		mov.l 	@r15,r15	/* restore saved_r15 */\n"
++
++		:
++		: "r"(&ar)
++		: "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r13"
++		);
++
++
++    if (ar.status > 1) {
++        if (ar.status == 2)
++            strm->msg = "invalid literal/length code";
++        else if (ar.status == 3)
++            strm->msg = "invalid distance code";
++        else
++            strm->msg = "invalid distance too far back";
++        state->mode = BAD;
++    }
++    else if ( ar.status == 1 ) {
++        state->mode = TYPE;
++    }
++
++    /* return unused bytes (on entry, bits < 8, so in won't go too far back) */
++    ar.len = ar.bits >> 3;
++    ar.in -= ar.len;
++    ar.bits -= ar.len << 3;
++    ar.hold &= (1U << ar.bits) - 1;
++
++    /* update state and return */
++    strm->next_in = ar.in;
++    strm->next_out = ar.out;
++    strm->avail_in = (unsigned)(ar.in < ar.last ? 5 + (ar.last - ar.in) : 5 - (ar.in - ar.last));
++    strm->avail_out = (unsigned)(ar.out < ar.end ?
++                                 257 + (ar.end - ar.out) : 257 - (ar.out - ar.end));
++    state->hold = ar.hold;
++    state->bits = ar.bits;
++    return;
++}
++
