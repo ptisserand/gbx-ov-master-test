@@ -220,6 +220,7 @@ git_fetch() {
 	if [[ -n ${repo_uri%%:*} ]] ; then
 		case ${repo_uri%%:*} in
 			git*|http|https|rsync|ssh|file|*@*)
+				repo_uri=${repo_uri/file:\/\//}
 				;;
 			tarball)
 				REPO_TARBALL_PATH=$(git__get_repo_localtarball)
